@@ -2,11 +2,14 @@
 """ Utility functions for the GUI """
 import logging
 import os
+import platform
 import sys
 import tkinter as tk
+
 from tkinter import filedialog
 from threading import Event, Thread
 from queue import Queue
+
 import numpy as np
 
 from PIL import Image, ImageDraw, ImageTk
@@ -17,10 +20,11 @@ from .project import Project, Tasks
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 _CONFIG = None
 _IMAGES = None
+_PREVIEW_TRIGGER = None
 PATHCACHE = os.path.join(os.path.realpath(os.path.dirname(sys.argv[0])), "lib", "gui", ".cache")
 
 
-def initialize_config(root, cli_opts, statusbar, session):
+def initialize_config(root, cli_opts, statusbar):
     """ Initialize the GUI Master :class:`Config` and add to global constant.
 
     This should only be called once on first GUI startup. Future access to :class:`Config`
@@ -34,15 +38,13 @@ def initialize_config(root, cli_opts, statusbar, session):
         The command line options object
     statusbar: :class:`lib.gui.custom_widgets.StatusBar`
         The GUI Status bar
-    session: :class:`lib.gui.stats.Session`
-        The current training Session
     """
     global _CONFIG  # pylint: disable=global-statement
     if _CONFIG is not None:
         return None
     logger.debug("Initializing config: (root: %s, cli_opts: %s, "
-                 "statusbar: %s, session: %s)", root, cli_opts, statusbar, session)
-    _CONFIG = Config(root, cli_opts, statusbar, session)
+                 "statusbar: %s)", root, cli_opts, statusbar)
+    _CONFIG = Config(root, cli_opts, statusbar)
     return _CONFIG
 
 
@@ -86,20 +88,21 @@ class FileHandler():  # pylint:disable=too-few-public-methods
 
     Parameters
     ----------
-    handletype: ['open', 'save', 'filename', 'filename_multi', 'savefilename', 'context']
+    handle_type: ['open', 'save', 'filename', 'filename_multi', 'savefilename', 'context', `dir`]
         The type of file dialog to return. `open` and `save` will perform the open and save actions
         and return the file. `filename` returns the filename from an `open` dialog.
         `filename_multi` allows for multi-selection of files and returns a list of files selected.
         `savefilename` returns the filename from a `save as` dialog. `context` is a context
-        sensitive parameter that returns a certain dialog based on the current options
-    filetype: ['default', 'alignments', 'config_project', 'config_task', 'config_all', 'csv', \
+        sensitive parameter that returns a certain dialog based on the current options. `dir` asks
+        for a folder location.
+    file_type: ['default', 'alignments', 'config_project', 'config_task', 'config_all', 'csv', \
                'image', 'ini', 'state', 'log', 'video']
         The type of file that this dialog is for. `default` allows selection of any files. Other
         options limit the file type selection
     title: str, optional
         The title to display on the file dialog. If `None` then the default title will be used.
         Default: ``None``
-    initialdir: str, optional
+    initial_folder: str, optional
         The folder to initially open with the file dialog. If `None` then tkinter will decide.
         Default: ``None``
     command: str, optional
@@ -123,15 +126,20 @@ class FileHandler():  # pylint:disable=too-few-public-methods
     '/path/to/selected/video.mp4'
     """
 
-    def __init__(self, handletype, filetype, title=None, initialdir=None, command=None,
+    def __init__(self, handle_type, file_type, title=None, initial_folder=None, command=None,
                  action=None, variable=None):
-        logger.debug("Initializing %s: (Handletype: '%s', filetype: '%s', title: '%s', "
-                     "initialdir: '%s, 'command: '%s', action: '%s', variable: %s)",
-                     self.__class__.__name__, handletype, filetype, title, initialdir, command,
-                     action, variable)
-        self._handletype = handletype
+        logger.debug("Initializing %s: (handle_type: '%s', file_type: '%s', title: '%s', "
+                     "initial_folder: '%s, 'command: '%s', action: '%s', variable: %s)",
+                     self.__class__.__name__, handle_type, file_type, title, initial_folder,
+                     command, action, variable)
+        self._handletype = handle_type
         self._defaults = self._set_defaults()
-        self._kwargs = self._set_kwargs(title, initialdir, filetype, command, action, variable)
+        self._kwargs = self._set_kwargs(title,
+                                        initial_folder,
+                                        file_type,
+                                        command,
+                                        action,
+                                        variable)
         self.retfile = getattr(self, "_{}".format(self._handletype.lower()))()
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -163,13 +171,19 @@ class FileHandler():  # pylint:disable=too-few-public-methods
                                ("WebM", "*.webm"),
                                ("Windows Media Video", "*.wmv"),
                                all_files]}
-        # Add in multi-select options
-        for key, val in filetypes.items():
-            if len(val) < 3:
-                continue
-            multi = ["{} Files".format(key.title())]
-            multi.append(" ".join([ftype[1] for ftype in val if ftype[0] != "All files"]))
-            val.insert(0, tuple(multi))
+
+        # Add in multi-select options and upper case extensions for Linux
+        for key in filetypes:
+            if platform.system() == "Linux":
+                filetypes[key] = [item
+                                  if item[0] == "All files"
+                                  else (item[0], "{} {}".format(item[1], item[1].upper()))
+                                  for item in filetypes[key]]
+            if len(filetypes[key]) > 2:
+                multi = ["{} Files".format(key.title())]
+                multi.append(" ".join([ftype[1]
+                                       for ftype in filetypes[key] if ftype[0] != "All files"]))
+                filetypes[key].insert(0, tuple(multi))
         return filetypes
 
     @property
@@ -480,7 +494,6 @@ class Images():
         gui_preview = os.path.join(self._pathoutput, ".gui_preview.jpg")
         if not image_files or (len(image_files) == 1 and gui_preview not in image_files):
             logger.debug("No preview to display")
-            self._previewoutput = None
             return
         # Filter to just the gui_preview if it exists in folder output
         image_files = [gui_preview] if gui_preview in image_files else image_files
@@ -490,7 +503,14 @@ class Images():
         if not image_files:
             return
 
-        self._load_images_to_cache(image_files, frame_dims, thumbnail_size)
+        if not self._load_images_to_cache(image_files, frame_dims, thumbnail_size):
+            logger.debug("Failed to load any preview images")
+            if gui_preview in image_files:
+                # Reset last modified for failed loading of a gui preview image so it is picked
+                # up next time
+                self._previewcache["modified"] = None
+            return
+
         if image_files == [gui_preview]:
             # Delete the preview image so that the main scripts know to output another
             logger.debug("Deleting preview image")
@@ -542,18 +562,30 @@ class Images():
             The (width (`int`), height (`int`)) of the display panel that will display the preview
         thumbnail_size: int
             The size of each thumbnail that should be created
+
+        Returns
+        -------
+        bool
+            ``True`` if images were succesfully loaded to cache otherwise ``False``
         """
         logger.debug("Number image_files: %s, frame_dims: %s, thumbnail_size: %s",
                      len(image_files), frame_dims, thumbnail_size)
         num_images = (frame_dims[0] // thumbnail_size) * (frame_dims[1] // thumbnail_size)
         logger.debug("num_images: %s", num_images)
         if num_images == 0:
-            return
+            return False
         samples = list()
         start_idx = len(image_files) - num_images if len(image_files) > num_images else 0
         show_files = sorted(image_files, key=os.path.getctime)[start_idx:]
+        dropped_files = list()
         for fname in show_files:
-            img = Image.open(fname)
+            try:
+                img = Image.open(fname)
+            except PermissionError as err:
+                logger.debug("Permission error opening preview file: '%s'. Original error: %s",
+                             fname, str(err))
+                dropped_files.append(fname)
+                continue
             width, height = img.size
             scaling = thumbnail_size / max(width, height)
             logger.debug("image width: %s, height: %s, scaling: %s", width, height, scaling)
@@ -567,7 +599,16 @@ class Images():
             draw = ImageDraw.Draw(img)
             draw.rectangle(((0, 0), (thumbnail_size, thumbnail_size)), outline="#E5E5E5", width=1)
             samples.append(np.array(img))
+
         samples = np.array(samples)
+        if not np.any(samples):
+            logger.debug("No preview images collected.")
+            return False
+
+        if dropped_files:
+            logger.debug("Removing dropped files: %s", dropped_files)
+            show_files = [fname for fname in show_files if fname not in dropped_files]
+
         self._previewcache["filenames"] = (self._previewcache["filenames"] +
                                            show_files)[-num_images:]
         cache = self._previewcache["images"]
@@ -579,6 +620,7 @@ class Images():
             cache = np.concatenate((cache, samples))[-num_images:]
         self._previewcache["images"] = cache
         logger.debug("Cache shape: %s", self._previewcache["images"].shape)
+        return True
 
     def _place_previews(self, frame_dims):
         """ Format the preview thumbnails stored in the cache into a grid fitting the display
@@ -754,16 +796,15 @@ class Config():
         The command line options object
     statusbar: :class:`lib.gui.custom_widgets.StatusBar`
         The GUI Status bar
-    session: :class:`lib.gui.stats.Session`
-        The current training Session
     """
-    def __init__(self, root, cli_opts, statusbar, session):
-        logger.debug("Initializing %s: (root %s, cli_opts: %s, statusbar: %s, session: %s)",
-                     self.__class__.__name__, root, cli_opts, statusbar, session)
+    def __init__(self, root, cli_opts, statusbar):
+        logger.debug("Initializing %s: (root %s, cli_opts: %s, statusbar: %s)",
+                     self.__class__.__name__, root, cli_opts, statusbar)
+        self._default_font = tk.font.nametofont("TkDefaultFont").configure()["family"]
         self._constants = dict(
             root=root,
             scaling_factor=self._get_scaling(root),
-            default_font=tk.font.nametofont("TkDefaultFont").configure()["family"])
+            default_font=self._default_font)
         self._gui_objects = dict(
             cli_opts=cli_opts,
             tk_vars=self._set_tk_vars(),
@@ -773,8 +814,6 @@ class Config():
             status_bar=statusbar,
             command_notebook=None)  # set in command.py
         self._user_config = UserConfig(None)
-        self.session = session
-        self._default_font = tk.font.nametofont("TkDefaultFont").configure()["family"]
         logger.debug("Initialized %s", self.__class__.__name__)
 
     # Constants
@@ -1008,9 +1047,6 @@ class Config():
         refreshgraph = tk.BooleanVar()
         refreshgraph.set(False)
 
-        smoothgraph = tk.DoubleVar()
-        smoothgraph.set(0.90)
-
         updatepreview = tk.BooleanVar()
         updatepreview.set(False)
 
@@ -1024,7 +1060,6 @@ class Config():
                    "generate": generatecommand,
                    "consoleclear": consoleclear,
                    "refreshgraph": refreshgraph,
-                   "smoothgraph": smoothgraph,
                    "updatepreview": updatepreview,
                    "analysis_folder": analysis_folder}
         logger.debug(tk_vars)
@@ -1064,7 +1099,7 @@ class Config():
             initial_dimensions = (round(width * self.scaling_factor),
                                   round(height * self.scaling_factor))
 
-        if fullscreen and sys.platform == "win32":
+        if fullscreen and sys.platform in ("win32", "darwin"):
             self.root.state('zoomed')
         elif fullscreen:
             self.root.attributes('-zoomed', True)
@@ -1149,3 +1184,44 @@ class LongRunningTask(Thread):
         logger.debug("Got result from thread")
         self._config.set_cursor_default(widget=self._widget)
         return retval
+
+
+class PreviewTrigger():
+    """ Trigger to indicate to underlying Faceswap process that the preview image should
+    be updated.
+
+    Writes a file to the cache folder that is picked up by the main process.
+    """
+    def __init__(self):
+        logger.debug("Initializing: %s", self.__class__.__name__)
+        self._trigger_file = os.path.join(PATHCACHE, ".preview_trigger")
+        logger.debug("Initialized: %s (trigger_file: %s)",
+                     self.__class__.__name__, self._trigger_file)
+
+    def set(self):
+        """ Place the trigger file into the cache folder """
+        if not os.path.isfile(self._trigger_file):
+            with open(self._trigger_file, "w"):
+                pass
+            logger.debug("Set preview update trigger: %s", self._trigger_file)
+
+    def clear(self):
+        """ Remove the trigger file from the cache folder """
+        if os.path.isfile(self._trigger_file):
+            os.remove(self._trigger_file)
+            logger.debug("Removed preview update trigger: %s", self._trigger_file)
+
+
+def preview_trigger():
+    """ Set the global preview trigger if it has not always been set and return.
+
+    Returns
+    -------
+    :class:`PreviewTrigger`
+        The trigger to indicate to the main faceswap process that it should perform a training
+        preview update
+    """
+    global _PREVIEW_TRIGGER  # pylint:disable=global-statement
+    if _PREVIEW_TRIGGER is None:
+        _PREVIEW_TRIGGER = PreviewTrigger()
+    return _PREVIEW_TRIGGER

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-""" Default configurations for faceswap
-    Extends out configparser funcionality by checking for default config updates
-    and returning data in it's correct format """
+""" Default configurations for faceswap.
+    Extends out :class:`configparser.ConfigParser` functionality by checking for default
+    configuration updates and returning data in it's correct format """
 
 import logging
 import os
@@ -9,6 +9,8 @@ import sys
 from collections import OrderedDict
 from configparser import ConfigParser
 from importlib import import_module
+
+from lib.utils import full_path_split
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -34,7 +36,8 @@ class FaceswapConfig():
             Return a dict of config items with their set values for items
             that can be altered after the model has been created """
         retval = dict()
-        for sect in ("global", self.section):
+        sections = [sect for sect in self.config.sections() if sect.startswith("global")]
+        for sect in sections + [self.section]:
             if sect not in self.defaults:
                 continue
             for key, val in self.defaults[sect].items():
@@ -63,12 +66,57 @@ class FaceswapConfig():
         """
         raise NotImplementedError
 
+    def _defaults_from_plugin(self, plugin_folder):
+        """ Scan the given plugins folder for config defaults.py files and update the
+        default configuration.
+
+        Parameters
+        ----------
+        plugin_folder: str
+            The folder to scan for plugins
+        """
+        for dirpath, _, filenames in os.walk(plugin_folder):
+            default_files = [fname for fname in filenames if fname.endswith("_defaults.py")]
+            if not default_files:
+                continue
+            base_path = os.path.dirname(os.path.realpath(sys.argv[0]))
+            # Can't use replace as there is a bug on some Windows installs that lowers some paths
+            import_path = ".".join(full_path_split(dirpath[len(base_path):])[1:])
+            plugin_type = import_path.split(".")[-1]
+            for filename in default_files:
+                self._load_defaults_from_module(filename, import_path, plugin_type)
+
+    def _load_defaults_from_module(self, filename, module_path, plugin_type):
+        """ Load the plugin's defaults module, extract defaults and add to default configuration.
+
+        Parameters
+        ----------
+        filename: str
+            The filename to load the defaults from
+        module_path: str
+            The path to load the module from
+        plugin_type: str
+            The type of plugin that the defaults are being loaded for
+        """
+        logger.debug("Adding defaults: (filename: %s, module_path: %s, plugin_type: %s",
+                     filename, module_path, plugin_type)
+        module = os.path.splitext(filename)[0]
+        section = ".".join((plugin_type, module.replace("_defaults", "")))
+        logger.debug("Importing defaults module: %s.%s", module_path, module)
+        mod = import_module("{}.{}".format(module_path, module))
+        self.add_section(title=section, info=mod._HELPTEXT)  # pylint:disable=protected-access
+        for key, val in mod._DEFAULTS.items():  # pylint:disable=protected-access
+            self.add_item(section=section, title=key, **val)
+        logger.debug("Added defaults: %s", section)
+
     @property
     def config_dict(self):
-        """ Collate global options and requested section into a dictionary
-            with the correct datatypes """
+        """ Collate global options and requested section into a dictionary with the correct
+        data types """
         conf = dict()
-        for sect in ("global", self.section):
+        sections = [sect for sect in self.config.sections() if sect.startswith("global")]
+        sections.append(self.section)
+        for sect in sections:
             if sect not in self.config.sections():
                 continue
             for key in self.config[sect]:
@@ -134,10 +182,10 @@ class FaceswapConfig():
             is_radio is to indicate to the GUI that it should display Radio Buttons rather than
             combo boxes for multiple choice options.
 
-            The 'fixed' parameter is only for training configs. Training configurations
+            The 'fixed' parameter is only for training configurations. Training configurations
             are set when the model is created, and then reloaded from the state file.
             Marking an item as fixed=False indicates that this value can be changed for
-            existing models, and will overide the value saved in the state file with the
+            existing models, and will override the value saved in the state file with the
             updated value in config.
 
             The 'Group' parameter allows you to assign the config item to a group in the GUI
@@ -178,6 +226,7 @@ class FaceswapConfig():
     @staticmethod
     def expand_helptext(helptext, choices, default, datatype, min_max, fixed):
         """ Add extra helptext info from parameters """
+        helptext += "\n"
         if not fixed:
             helptext += "\nThis option can be updated for existing models."
         if choices:

@@ -8,6 +8,8 @@ import sys
 import tkinter as tk
 from tkinter import ttk, TclError
 
+import numpy as np
+
 from .utils import get_config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -423,8 +425,7 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
 
     def __init__(self, parent, hide_status=False):
         super().__init__(parent)
-        self.pack(side=tk.BOTTOM, padx=10, pady=2, fill=tk.X, expand=False)
-
+        self._frame = ttk.Frame(self)
         self._message = tk.StringVar()
         self._pbar_message = tk.StringVar()
         self._pbar_position = tk.IntVar()
@@ -433,6 +434,8 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
 
         self._status(hide_status)
         self._pbar = self._progress_bar()
+        self.pack(side=tk.BOTTOM, fill=tk.X, expand=False)
+        self._frame.pack(padx=10, pady=2, fill=tk.X, expand=False)
 
     @property
     def message(self):
@@ -452,7 +455,7 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
         if hide_status:
             return
 
-        statusframe = ttk.Frame(self)
+        statusframe = ttk.Frame(self._frame)
         statusframe.pack(side=tk.LEFT, anchor=tk.W, fill=tk.X, expand=False)
 
         lbltitle = ttk.Label(statusframe, text="Status:", width=6, anchor=tk.W)
@@ -466,7 +469,7 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
 
     def _progress_bar(self):
         """ Place progress bar into right of the status bar. """
-        progressframe = ttk.Frame(self)
+        progressframe = ttk.Frame(self._frame)
         progressframe.pack(side=tk.RIGHT, anchor=tk.E, fill=tk.X)
 
         lblmessage = ttk.Label(progressframe, textvariable=self._pbar_message)
@@ -527,9 +530,8 @@ class StatusBar(ttk.Frame):  # pylint: disable=too-many-ancestors
             self._pbar_position.set(position)
 
 
-class Tooltip:
-    """
-    Create a tooltip for a given widget as the mouse goes on it.
+class Tooltip:  # pylint:disable=too-few-public-methods
+    """ Create a tooltip for a given widget as the mouse goes on it.
 
     Parameters
     ----------
@@ -541,6 +543,9 @@ class Tooltip:
         (left, top, right, bottom) padding for the tool-tip. Default: (5, 3, 5, 3)
     text: str, optional
         The text to be displayed in the tool-tip. Default: 'widget info'
+    text_variable: :class:`tkinter.strVar`, optional
+        The text variable to use for dynamic help text. Appended after the contents of :attr:`text`
+        if provided. Default: ``None``
     waittime: int, optional
         The time in milliseconds to wait before showing the tool-tip. Default: 400
     wraplength: int, optional
@@ -558,12 +563,13 @@ class Tooltip:
     http://www.daniweb.com/programming/software-development/code/484591/a-tooltip-class-for-tkinter
     """
     def __init__(self, widget, *, background="#FFFFEA", pad=(5, 3, 5, 3), text="widget info",
-                 waittime=400, wraplength=250):
+                 text_variable=None, waittime=400, wraplength=250):
 
         self._waittime = waittime  # in milliseconds, originally 500
         self._wraplength = wraplength  # in pixels, originally 180
         self._widget = widget
         self._text = text
+        self._text_variable = text_variable
         self._widget.bind("<Enter>", self._on_enter)
         self._widget.bind("<Leave>", self._on_leave)
         self._widget.bind("<ButtonPress>", self._on_leave)
@@ -656,8 +662,12 @@ class Tooltip:
         win = tk.Frame(self._topwidget,
                        background=background,
                        borderwidth=0)
+
+        text = self._text
+        if self._text_variable and self._text_variable.get():
+            text += "\n\nCurrent value: '{}'".format(self._text_variable.get())
         label = tk.Label(win,
-                         text=self._text,
+                         text=text,
                          justify=tk.LEFT,
                          background=background,
                          relief=tk.SOLID,
@@ -699,7 +709,7 @@ class MultiOption(ttk.Checkbutton):  # pylint: disable=too-many-ancestors
     """
     def __init__(self, parent, value, variable, **kwargs):
         self._tk_var = tk.BooleanVar()
-        self._tk_var.set(False)
+        self._tk_var.set(value == variable.get())
         super().__init__(parent, variable=self._tk_var, **kwargs)
         self._value = value
         self._master_variable = variable
@@ -760,3 +770,119 @@ class MultiOption(ttk.Checkbutton):  # pylint: disable=too-many-ancestors
         state = self._value in self._master_list
         logger.trace("Setting '%s' to %s", self._value, state)
         self._tk_var.set(state)
+
+
+class PopupProgress(tk.Toplevel):
+    """ A simple pop up progress bar that appears of the center of the root window.
+
+    When this is called, the root will be disabled until the :func:`close` method is called.
+
+    Parameters
+    ----------
+    title: str
+        The title to appear above the progress bar
+    total: int or float
+        The total count of items for the progress bar
+
+    Example
+    -------
+    >>> total = 100
+    >>> progress = PopupProgress("My title...", total)
+    >>> for i in range(total):
+    >>>     progress.update(1)
+    >>> progress.close()
+    """
+    def __init__(self, title, total):
+        super().__init__()
+        self._total = total
+        if platform.system() == "Darwin":  # For Mac OS
+            self.tk.call("::tk::unsupported::MacWindowStyle",
+                         "style", self._w,  # pylint:disable=protected-access
+                         "help", "none")
+        # Leaves only the label and removes the app window
+        self.wm_overrideredirect(True)
+        self.attributes('-topmost', 'true')
+        self.transient()
+
+        self._lbl_title = self._set_title(title)
+        self._progress_bar = self._get_progress_bar()
+
+        offset = np.array((self.master.winfo_rootx(), self.master.winfo_rooty()))
+        # TODO find way to get dimensions of the pop up without it flicking onto the screen
+        self.update_idletasks()
+        center = np.array((
+            (self.master.winfo_width() // 2) - (self.winfo_width() // 2),
+            (self.master.winfo_height() // 2) - (self.winfo_height() // 2))) + offset
+        self.wm_geometry("+{}+{}".format(*center))
+        get_config().set_cursor_busy()
+        self.grab_set()
+
+    @property
+    def progress_bar(self):
+        """ :class:`tkinter.ttk.Progressbar`: The progress bar object within the pop up window. """
+        return self._progress_bar
+
+    def _set_title(self, title):
+        """ Set the initial title of the pop up progress bar.
+
+        Parameters
+        ----------
+        title: str
+            The title to appear above the progress bar
+
+        Returns
+        -------
+        :class:`tkinter.ttk.Label`
+            The heading label for the progress bar
+        """
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.TOP, padx=5, pady=5)
+        lbl = ttk.Label(frame, text=title)
+        lbl.pack(side=tk.TOP, pady=(5, 0), expand=True, fill=tk.X)
+        return lbl
+
+    def _get_progress_bar(self):
+        """ Set up the progress bar with the supplied total.
+
+        Returns
+        -------
+        :class:`tkinter.ttk.Progressbar`
+            The configured progress bar for the pop up window
+        """
+        frame = ttk.Frame(self)
+        frame.pack(side=tk.BOTTOM, padx=5, pady=(0, 5))
+        pbar = ttk.Progressbar(frame,
+                               length=400,
+                               maximum=self._total,
+                               mode="determinate")
+        pbar.pack(side=tk.LEFT)
+        return pbar
+
+    def step(self, amount):
+        """ Increment the progress bar.
+
+        Parameters
+        ----------
+        amount: int or float
+            The amount to increment the progress bar by
+        """
+        self._progress_bar.step(amount)
+        self._progress_bar.update_idletasks()
+
+    def stop(self):
+        """ Stop the progress bar, re-enable the root window and destroy the pop up window. """
+        self._progress_bar.stop()
+        get_config().set_cursor_default()
+        self.grab_release()
+        self.destroy()
+
+    def update_title(self, title):
+        """ Update the title that displays above the progress bar.
+
+        Parameters
+        ----------
+        title: str
+            The title to appear above the progress bar
+        """
+        self._lbl_title.config(text=title)
+        self._lbl_title.update_idletasks()
